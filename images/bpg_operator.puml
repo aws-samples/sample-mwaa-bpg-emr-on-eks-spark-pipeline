@@ -1,0 +1,99 @@
+@startuml
+
+left to right direction
+
+skinparam class {
+    BackgroundColor White
+    ArrowColor Black
+    BorderColor Black
+}
+
+package "airflow" {
+
+    class AirflowPlugin as "AirflowPlugin" {
+        + name: str
+        + operators: list
+    }
+
+    class BaseOperator as "BaseOperator"  {
+        + execute(context)
+        + __init__(*args, **kwargs)
+    }
+
+    class BaseHook as "BaseHook" {
+        + get_connection(conn_id)
+    }
+
+    AirflowPlugin <-[hidden]left-> BaseOperator
+    BaseOperator <-[hidden]left-> BaseHook
+}
+
+
+package "custom_plugin" {
+    class BPGOperator {
+        .. Attributes ..
+        - BPG_JOB_ENDPOINT: str
+        - BPG_LOG_ENDPOINT: str
+        - application_file: str
+        - application_content: str
+        - connection_id: str
+        - log_poll_interval: int
+        - application_timeout: int
+        .. Public Methods ..
+        + __init__(...)
+        + execute(context)
+        .. Private Methods ..
+        - _is_mwaa()
+        - _fetch_from_s3()
+        - _fetch_from_local()
+        - _read_application_file_from_s3()
+        - _parse_file_content()
+        - _submit_job()
+        - _poll_job_status()
+        - _fetch_logs()
+    }
+
+    class BPGMWAAPlugin {
+        + name: str = "bpg_mwaa_plugin"
+        + operators: list = [BPGOperator]
+    }
+}
+
+package "external.libraries" {
+    interface "requests" as requests
+    interface "boto3" as boto3
+    interface "yaml" as yaml
+    interface "json" as json
+
+    requests -[hidden]left-> boto3
+    boto3 -[hidden]left-> yaml
+    yaml -[hidden]left-> json
+}
+
+' Inheritance relationships
+BaseOperator <|-- BPGOperator
+AirflowPlugin <|-- BPGMWAAPlugin
+
+' Import/Usage relationships
+BPGOperator ..> BaseHook : import
+BPGMWAAPlugin ..> BPGOperator : registers
+
+' External library dependencies
+BPGOperator ...> requests : import
+BPGOperator ...> boto3 : import
+BPGOperator ...> yaml : import
+BPGOperator ...> json : import
+
+note right of BPGOperator
+  Handles Batch Processing Gateway
+  job submissions and monitoring
+end note
+
+note right of BPGMWAAPlugin
+  Registers BPGOperator
+  as an Airflow plugin
+end note
+
+
+@enduml
+

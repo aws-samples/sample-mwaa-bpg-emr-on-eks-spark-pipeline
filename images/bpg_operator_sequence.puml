@@ -1,0 +1,66 @@
+@startuml
+skinparam sequenceMessageAlign center
+skinparam backgroundColor white
+
+participant "Airflow DAG" as DAG
+participant "BPGOperator" as BPG
+participant "BaseHook" as Hook
+participant "Amazon S3/Local Storage" as Storage
+participant "BPG Service" as Service
+
+activate DAG
+DAG -> BPG: execute(context)
+activate BPG
+
+alt application_content provided
+    BPG -> BPG: _parse_file_content()
+else application_file provided
+    alt is_mwaa() == true
+        BPG -> Storage: _fetch_from_s3()
+        Storage --> BPG: file content
+    else local environment
+        BPG -> Storage: _fetch_from_local()
+        Storage --> BPG: file content
+    end
+    BPG -> BPG: _parse_file_content()
+end
+
+BPG -> Hook: get_connection(connection_id)
+activate Hook
+Hook --> BPG: connection details
+deactivate Hook
+
+BPG -> BPG: _get_headers()
+BPG -> Service: POST /skatev2/spark (submit job)
+activate Service
+Service --> BPG: submission_id
+deactivate Service
+
+loop until job completes or timeout
+    BPG -> Service: GET /skatev2/spark/{submission_id}/status
+    activate Service
+    Service --> BPG: job status
+    deactivate Service
+
+    alt status == "RUNNING"
+        BPG -> Service: GET /skatev2/log?subId={submission_id}
+        activate Service
+        Service --> BPG: log stream
+        deactivate Service
+        BPG -> BPG: log.info(log_content)
+    else status == "COMPLETED"
+        BPG --> DAG: Success
+        break
+    else status == "FAILED"
+        BPG --> DAG: Raise Exception
+        break
+    end
+    
+    BPG -> BPG: sleep(log_poll_interval)
+end
+
+deactivate BPG
+deactivate DAG
+
+@enduml
+
