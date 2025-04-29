@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation template for IAM Roles, Policies, OIDC Providers, and EMR on EKS Virtual Clusters"
+
+Parameters:
+  ProjectName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: "MWAA-BPG-Spark-Pipeline"
+
+  CreateEMRContainersServiceLinkedRole:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Set to true if the AWSServiceRoleForAmazonEMRContainers doesn't exists. It is usually already present.
+
+  CommonKMSKeyArn:
+    Description: ARN of the KMS key used for CloudWatch Logs encryption
+    Type: String
+
+Conditions:
+  ShouldCreateEMRContainersServiceLinkedRole: !Equals
+    - !Ref CreateEMRContainersServiceLinkedRole
+    - "true"
+
+Resources:
+  # Single IAM Role for both Spark job clusters
+  EMRSparkJobRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Explicit name required for EMR job execution role as it needs to be referenced consistently across the application"
+    Properties:
+      RoleName: MWAAEmrSparkJobExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: elasticmapreduce.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: MWAAEMRSparkJobPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:DescribeLogGroups"
+                  - "logs:DescribeLogStreams"
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref CommonKMSKeyArn
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  # AWSServiceRoleForAmazonEMRContainers
+  AWSServiceRoleForEMRContainers:
+    Type: AWS::IAM::Role
+    Condition: ShouldCreateEMRContainersServiceLinkedRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Explicit name required as this is a service-linked role with a specific required name"
+    Properties:
+      RoleName: AWSServiceRoleForAmazonEMRContainers
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: emr-containers.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/aws-service-role/AmazonEMRContainersServiceRolePolicy
+      Policies:
+        - PolicyName: KMSAccessForLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref CommonKMSKeyArn
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+Outputs:
+  EMRSparkJobRoleArn:
+    Description: ARN of the IAM Role for EMR Spark jobs
+    Value: !GetAtt EMRSparkJobRole.Arn

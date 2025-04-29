@@ -1,0 +1,192 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "RDS Stack for MWAA BPG Spark Pipeline Infrastructure"
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "MWAA-BPG-Spark-Pipeline"
+    Description: Environment name used for tagging and resource naming
+
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC ID where the RDS instance will be created
+
+  # Network
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.192.0.0/16
+
+  PrivateSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of private subnet IDs for the RDS instance
+
+  DBIdentifier:
+    Type: String
+    Default: bpgdb
+    Description: Name of the database to be created in the RDS instance
+
+  DBName:
+    Type: String
+    Default: bpg
+    Description: Name of the database to be created in the RDS instance
+
+  DBInstanceClass:
+    Type: String
+    Default: db.r5.large
+    Description: The compute and memory capacity class of the DB instance
+
+  DBEngineVersion:
+    Type: String
+    Default: 8.0
+    Description: The version number of the database engine (MySQL)
+
+  EKSSecurityGroups:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: List of EKS cluster security group IDs to allow access to RDS
+
+Resources:
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: | 
+              Open egress is required for RDS to function properly. This allows: Access to AWS services,
+              System updates and patches and Required outbound connectivity for database operations  
+    Properties:
+      GroupDescription: Security group for BPG RDS Cluster
+      VpcId: !Ref VPC
+      # Ingress and Egress rules for directly using the DBClusterEndpoint without DBProxy
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Select [0, !Ref EKSSecurityGroups]
+          Description: !Sub EKS SG for ${DBIdentifier}-sg
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Select [1, !Ref EKSSecurityGroups]
+          Description: !Sub EKS SG for ${DBIdentifier}-sg
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: All traffic to DB Security Group
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${DBIdentifier}-sg
+        - Key: Description
+          Value: "Security group for BPG RDS cluster"
+
+  DBSecretKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "KMS key for BPG DB Secret"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Enable IAM User Permissions"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  DBSecretKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ProjectName}-bpg-secret-key"
+      TargetKeyId: !Ref DBSecretKMSKey
+
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: /aurora/bpg/db-secret
+      KmsKeyId: !Ref DBSecretKMSKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "bpg"}'
+        GenerateStringKey: password
+        PasswordLength: 20
+        ExcludeCharacters: '"@/\'
+        ExcludePunctuation: true
+        IncludeSpace: false
+        RequireEachIncludedType: true
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for BPG Aurora PostgreSQL RDS
+      SubnetIds: !Ref PrivateSubnets
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  DBCluster:
+    Type: AWS::RDS::DBCluster
+    #checkov:skip=CKV_AWS_162: "IAM Authentication is not required in this setup"
+    Properties:
+      Engine: aurora-mysql
+      EngineVersion: !Ref DBEngineVersion
+      BackupRetentionPeriod: 1
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DatabaseName: !Ref DBName
+      StorageEncrypted: true
+      Port: 3306
+      VpcSecurityGroupIds:
+        - !Ref DBSecurityGroup
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${DBIdentifier}
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    #checkov:skip=CKV_AWS_118: "Enhanced monitoring is not required in this setup"
+    Properties:
+      PubliclyAccessible: false
+      DBClusterIdentifier: !Ref DBCluster
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: aurora-mysql
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${DBIdentifier}-writer
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+Outputs:
+  DBClusterIdentifier:
+    Description: Identifier of the DB Cluster
+    Value: !Ref DBCluster
+
+  DBClusterEndpoint:
+    Description: Endpoint of the DB cluster
+    Value: !GetAtt DBCluster.Endpoint.Address
+
+  DBClusterReadEndpoint:
+    Description: Read endpoint of the DB cluster
+    Value: !GetAtt DBCluster.ReadEndpoint.Address
+
+  DBSecretArn:
+    Description: ARN of the secret containing database credentials
+    Value: !Ref DBSecret
+
+  DBSecurityGroup:
+    Description: ID of the DB Security Group
+    Value: !Ref DBSecurityGroup

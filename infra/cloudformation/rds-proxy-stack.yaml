@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation template for RDS Proxy and Target Group"
+
+Parameters:
+  ProjectName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+
+  DBIdentifier:
+    Type: String
+    Description: Name of the database to be created in the RDS instance
+
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC ID
+
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.192.0.0/16
+
+  PrivateSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of private subnet IDs
+
+  EKSSecurityGroups:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: List of EKS cluster security group IDs to allow access to RDS
+
+  DBSecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret containing MySQL RDS credentials in the required format
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group ID of the RDS database
+
+Resources:
+  DBProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DBSecretArn
+        - PolicyName: RDSProxyAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBProxies
+                  - rds:DescribeDBProxyTargetGroups
+                  - rds:DescribeDBProxyTargets
+                  - rds:CreateDBProxy
+                  - rds:ModifyDBProxy
+                  - rds:DeleteDBProxy
+                Resource: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db-proxy/${DBIdentifier}-proxy"
+        - PolicyName: KMSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !Sub "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  DBProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS Proxy
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Select [0, !Ref EKSSecurityGroups]
+          Description: "Allow PostgreSQL access from EKS cluster security group 1"
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Select [1, !Ref EKSSecurityGroups]
+          Description: "Allow PostgreSQL access from EKS cluster security group 2"
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Select [2, !Ref EKSSecurityGroups]
+          Description: "Allow PostgreSQL access from EKS cluster security group 3"
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          DestinationSecurityGroupId: !Ref DBSecurityGroup
+          Description: "Allow outbound traffic"
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  DBProxy:
+    Type: AWS::RDS::DBProxy
+    DeletionPolicy: Delete
+    Properties:
+      DBProxyName: !Sub ${DBIdentifier}-proxy
+      EngineFamily: MYSQL
+      IdleClientTimeout: 1800
+      RequireTLS: true
+      RoleArn: !GetAtt DBProxyRole.Arn
+      Auth:
+        - AuthScheme: SECRETS
+          SecretArn: !Ref DBSecretArn
+          IAMAuth: DISABLED
+      VpcSubnetIds: !Ref PrivateSubnets
+      VpcSecurityGroupIds:
+        - !Ref DBProxySecurityGroup
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  DBSecurityGroupIngressFromProxy:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref DBProxySecurityGroup
+      Description: "Allow MySQL access from RDS Proxy security group"
+
+Outputs:
+  DBProxyName:
+    Description: The name of the created DB Proxy
+    Value: !Ref DBProxy
+
+  RDSProxyEndpoint:
+    Description: The endpoint of the created DB Proxy
+    Value: !GetAtt DBProxy.Endpoint
+
+  DBProxyArn:
+    Description: The ARN of the created DB Proxy
+    Value: !GetAtt DBProxy.DBProxyArn

@@ -1,0 +1,361 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Main Stack for setup pipelines using Amazon MWAA, Batch Processing Gateway for Spark workload on Multiple EMR in EKS clusters."
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "CFN templates Location"
+        Parameters:
+          - TemplateBucketName
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - ProjectName
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - VpcCIDR
+          - PublicSubnet1CIDR
+          - PublicSubnet2CIDR
+          - PrivateSubnet1CIDR
+          - PrivateSubnet2CIDR
+      - Label:
+          default: "ECR Configuration"
+        Parameters:
+          - ECRRepoName
+      - Label:
+          default: "Database Configuration"
+        Parameters:
+          - DBIdentifier
+          - DBInstanceClass
+          - DBEngineVersion
+      - Label:
+          default: "S3 Configuration"
+        Parameters:
+          - MWAAS3BucketName
+      - Label:
+          default: "EKS Configuration"
+        Parameters:
+          - DataScienceClusterName
+          - AnalyticsClusterName
+          - ClusterVersion
+          - InstanceType
+
+Parameters:
+  # Bucket to store CFN templates
+  TemplateBucketName:
+    Description: Name of the S3 bucket containing the nested stack templates
+    Type: String
+
+  # Resource Tag
+  ProjectName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: "MWAA-BPG-Spark-Pipeline"
+
+  # Network
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.192.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.10.0/24
+
+  PublicSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.11.0/24
+
+  PrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.20.0/24
+
+  PrivateSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.21.0/24
+
+  # ECR
+  ECRRepoName:
+    Type: String
+    Default: "bpg"
+    Description: Name of the ECR repository for Batch Processing Gateway
+
+  # RDS
+  DBIdentifier:
+    Description: Name of the database for the Batch Processing Gateway
+    Type: String
+    Default: bpgdb
+
+  DBInstanceClass:
+    Description: The compute and memory capacity class for the RDS instance
+    Type: String
+    Default: db.r5.large
+
+  DBEngineVersion:
+    Description: The version number of the Aurora PostgreSQL database engine
+    Type: String
+    Default: "8.0"
+
+  # S3
+  MWAAS3BucketName:
+    Description: Name of the S3 bucket to be used for storing DAGs & Plugins for MWAA
+    Type: String
+    Default: "airflow-bpg-blog"
+
+  # EKS
+  DataScienceClusterName:
+    Description: Name of the Data Science EKS cluster
+    Type: String
+    Default: datascience-cluster
+
+  AnalyticsClusterName:
+    Description: Name of the Analytics EKS cluster
+    Type: String
+    Default: analytics-cluster
+
+  GatewayClusterName:
+    Description: Name of the Analytics EKS cluster
+    Type: String
+    Default: gateway-cluster
+
+  ClusterVersion:
+    Description: Kubernetes version for EKS clusters
+    Type: String
+    Default: "1.32"
+
+  InstanceType:
+    Description: EC2 instance type for the EKS worker nodes
+    Type: String
+    Default: m5.xlarge
+
+  # MWAA Configuration
+  MWAAEnvironmentName:
+    Type: String
+    Default: "airflow-environment"
+    Description: Name of the MWAA environment
+
+  AirflowVersion:
+    Type: String
+    Default: "2.10.3"
+    Description: Version of Apache Airflow to use
+
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/cloudformation/network-stack.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VpcCIDR: !Ref VpcCIDR
+        PublicSubnet1CIDR: !Ref PublicSubnet1CIDR
+        PublicSubnet2CIDR: !Ref PublicSubnet2CIDR
+        PrivateSubnet1CIDR: !Ref PrivateSubnet1CIDR
+        PrivateSubnet2CIDR: !Ref PrivateSubnet2CIDR
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  ECRStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/cloudformation/ecr-stack.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        ECRRepoName: !Ref ECRRepoName
+        CommonKMSKeyArn: !GetAtt NetworkStack.Outputs.CommonKMSKeyArn
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  EKSStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - S3Stack # NetworkStack - Dependency already enforced
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/cloudformation/eks-stack.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VPC: !GetAtt NetworkStack.Outputs.VPC
+        PrivateSubnets: !GetAtt NetworkStack.Outputs.PrivateSubnets
+        InstanceType: !Ref InstanceType
+        DataScienceClusterName: !Ref DataScienceClusterName
+        AnalyticsClusterName: !Ref AnalyticsClusterName
+        GatewayClusterName: !Ref GatewayClusterName
+        ClusterVersion: !Ref ClusterVersion
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  EMROnEKSRolesStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - S3Stack # EKSStack - Dependency already enforced
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/cloudformation/emr-on-eks-roles-stack.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        CreateEMRContainersServiceLinkedRole: "false"
+        CommonKMSKeyArn: !GetAtt NetworkStack.Outputs.CommonKMSKeyArn
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  RDSStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - ECRStack # NetworkStack, EKSStack - Dependency already enforced
+      - S3Stack
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/cloudformation/rds-stack.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VPC: !GetAtt NetworkStack.Outputs.VPC
+        VpcCIDR: !Ref VpcCIDR
+        PrivateSubnets: !GetAtt NetworkStack.Outputs.PrivateSubnets
+        DBIdentifier: !Ref DBIdentifier
+        DBInstanceClass: !Ref DBInstanceClass
+        DBEngineVersion: !Ref DBEngineVersion
+        EKSSecurityGroups: !GetAtt EKSStack.Outputs.EKSSecurityGroups
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  RDSProxyStack:
+    Type: AWS::CloudFormation::Stack
+    # RDSStack - Dependency already enforced
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/cloudformation/rds-proxy-stack.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        DBIdentifier: !Ref DBIdentifier
+        VPC: !GetAtt NetworkStack.Outputs.VPC
+        VpcCIDR: !Ref VpcCIDR
+        PrivateSubnets: !GetAtt NetworkStack.Outputs.PrivateSubnets
+        EKSSecurityGroups: !GetAtt EKSStack.Outputs.EKSSecurityGroups
+        DBSecretArn: !GetAtt RDSStack.Outputs.DBSecretArn
+        DBSecurityGroup: !GetAtt RDSStack.Outputs.DBSecurityGroup
+        # DBClusterIdentifier: !GetAtt RDSStack.Outputs.DBClusterIdentifier
+      TimeoutInMinutes: 30
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  S3Stack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/cloudformation/s3-stack.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        MWAAS3BucketName: !Ref MWAAS3BucketName
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  MWAAStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - NetworkStack
+      - S3Stack
+    Properties:
+      TemplateURL: !Sub https://${TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/cloudformation/mwaa-stack.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VPC: !GetAtt NetworkStack.Outputs.VPC
+        PrivateSubnets: !GetAtt NetworkStack.Outputs.PrivateSubnets
+        MWAAEnvironmentName: !Ref MWAAEnvironmentName
+        AirflowVersion: !Ref AirflowVersion
+        EnvironmentBucketName: !GetAtt S3Stack.Outputs.S3BucketName
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+Outputs:
+  VPC:
+    Description: A reference to the created VPC
+    Value: !GetAtt NetworkStack.Outputs.VPC
+
+  PublicSubnets:
+    Description: A list of the public subnets
+    Value: !GetAtt NetworkStack.Outputs.PublicSubnets
+
+  PrivateSubnets:
+    Description: A list of the private subnets
+    Value: !GetAtt NetworkStack.Outputs.PrivateSubnets
+
+  BPGECRRepositoryName:
+    Description: Name of the ECR repository for Batch Processing Gateway Image
+    Value: !GetAtt ECRStack.Outputs.BPGRepositoryName
+
+  BPGECRRepositoryUri:
+    Description: URI of the ECR repository for Batch Processing Gateway Image
+    Value: !GetAtt ECRStack.Outputs.BPGRepositoryUri
+
+  S3BucketName:
+    Description: Name of the S3 bucket for Airflow DAGs & Plugins
+    Value: !GetAtt S3Stack.Outputs.S3BucketName
+
+  S3BucketArn:
+    Description: ARN of the S3 bucket for Airflow DAGs & Plugins
+    Value: !GetAtt S3Stack.Outputs.S3BucketArn
+
+  DataScienceClusterName:
+    Description: Name of the Data Science EKS cluster
+    Value: !GetAtt EKSStack.Outputs.DataScienceClusterName
+
+  DataScienceClusterEndpoint:
+    Description: API server endpoint of the Data Science EKS cluster
+    Value: !GetAtt EKSStack.Outputs.DataScienceClusterEndpoint
+
+  DataScienceEKSSecurityGroup:
+    Description: Security Group ID for the Data Science EKS cluster
+    Value: !GetAtt EKSStack.Outputs.DataScienceEKSSecurityGroup
+
+  AnalyticsClusterName:
+    Description: Name of the Analytics EKS cluster
+    Value: !GetAtt EKSStack.Outputs.AnalyticsClusterName
+
+  GatewayClusterName:
+    Description: Name of the Gateway EKS cluster
+    Value: !GetAtt EKSStack.Outputs.GatewayClusterName
+
+  AnalyticsClusterEndpoint:
+    Description: API server endpoint of the Analytics EKS cluster
+    Value: !GetAtt EKSStack.Outputs.AnalyticsClusterEndpoint
+
+  AnalyticsEKSSecurityGroup:
+    Description: Security Group ID for the Analytics EKS cluster
+    Value: !GetAtt EKSStack.Outputs.AnalyticsEKSSecurityGroup
+
+  RDSClusterIdentifier:
+    Description: Identifier of the RDS Aurora cluster
+    Value: !GetAtt RDSStack.Outputs.DBClusterIdentifier
+
+  RDSClusterEndpoint:
+    Description: Endpoint of the RDS Aurora cluster
+    Value: !GetAtt RDSStack.Outputs.DBClusterEndpoint
+
+  RDSClusterReadEndpoint:
+    Description: Read endpoint of the RDS Aurora cluster
+    Value: !GetAtt RDSStack.Outputs.DBClusterReadEndpoint
+
+  RDSClusterSecurityGroup:
+    Description: ID of the DB Security Group
+    Value: !GetAtt RDSStack.Outputs.DBSecurityGroup
+
+  RDSProxyName:
+    Description: The name of the created DB Proxy
+    Value: !GetAtt RDSProxyStack.Outputs.DBProxyName
+
+  RDSProxyEndpoint:
+    Description: The endpoint of the created DB Proxy
+    Value: !GetAtt RDSProxyStack.Outputs.RDSProxyEndpoint
+
+  MWAAEnvironmentArn:
+    Description: ARN of the MWAA Environment
+    Value: !GetAtt MWAAStack.Outputs.MWAAEnvironmentArn
+
+  MWAAWebserverUrl:
+    Description: The webserver URL of the MWAA Environment
+    Value: !GetAtt MWAAStack.Outputs.MWAAWebserverUrl
+
+  MWAASecurityGroupId:
+    Description: Security Group ID for MWAA
+    Value: !GetAtt MWAAStack.Outputs.MWAASecurityGroupId

@@ -1,0 +1,271 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "EKS Stack for MWAA BPG Spark Pipeline Infrastructure"
+
+Parameters:
+  ProjectName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: "MWAA-BPG-Spark-Pipeline"
+
+  VPC:
+    Description: The VPC ID where EKS clusters will be created
+    Type: AWS::EC2::VPC::Id
+
+  PrivateSubnets:
+    Description: List of private subnet IDs for EKS clusters
+    Type: List<AWS::EC2::Subnet::Id>
+
+  InstanceType:
+    Description: EC2 instance type for EKS node groups
+    Type: String
+    Default: m5.xlarge
+
+  DataScienceClusterName:
+    Description: Name of the Data Science EKS cluster
+    Type: String
+    Default: datascience-cluster
+
+  AnalyticsClusterName:
+    Description: Name of the Analytics EKS cluster
+    Type: String
+    Default: analytics-cluster
+
+  GatewayClusterName:
+    Description: Name of the Gateway EKS cluster
+    Type: String
+    Default: gateway-cluster
+
+  ClusterVersion:
+    Description: Kubernetes version for EKS clusters
+    Type: String
+    Default: "1.32"
+
+Resources:
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  EKSNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  EKSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for EKS cluster secrets encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: Allow EKS to use the key
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt EKSClusterRole.Arn
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+
+  ######### Data Science EKS Cluster #########
+  DataScienceEKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref DataScienceClusterName
+      Version: !Ref ClusterVersion
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds: !Ref PrivateSubnets
+        SecurityGroupIds: []
+      EncryptionConfig:
+        - Provider:
+            KeyArn: !GetAtt EKSKMSKey.Arn
+          Resources:
+            - secrets
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  DataScienceNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DeletionPolicy: Delete
+    UpdatePolicy:
+      UpdateReplacePolicy: Retain
+    Properties:
+      ClusterName: !Ref DataScienceEKSCluster
+      NodeRole: !GetAtt EKSNodeRole.Arn
+      ScalingConfig:
+        MinSize: 1
+        DesiredSize: 1
+        MaxSize: 5
+      InstanceTypes:
+        - !Ref InstanceType
+      Subnets: !Ref PrivateSubnets
+
+  ######### Analytics EKS Cluster #########
+  AnalyticsEKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref AnalyticsClusterName
+      Version: !Ref ClusterVersion
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds: !Ref PrivateSubnets
+        SecurityGroupIds: []
+      EncryptionConfig:
+        - Provider:
+            KeyArn: !GetAtt EKSKMSKey.Arn
+          Resources:
+            - secrets
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  AnalyticsNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref AnalyticsEKSCluster
+      NodeRole: !GetAtt EKSNodeRole.Arn
+      ScalingConfig:
+        MinSize: 1
+        DesiredSize: 1
+        MaxSize: 5
+      InstanceTypes:
+        - !Ref InstanceType
+      Subnets: !Ref PrivateSubnets
+
+  ######### Gateway EKS Cluster #########
+  GatewayEKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref GatewayClusterName
+      Version: !Ref ClusterVersion
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds: !Ref PrivateSubnets
+        SecurityGroupIds: []
+      EncryptionConfig:
+        - Provider:
+            KeyArn: !GetAtt EKSKMSKey.Arn
+          Resources:
+            - secrets
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  GatewayNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DeletionPolicy: Delete
+    UpdatePolicy:
+      UpdateReplacePolicy: Retain
+    Properties:
+      ClusterName: !Ref GatewayEKSCluster
+      NodeRole: !GetAtt EKSNodeRole.Arn
+      ScalingConfig:
+        MinSize: 1
+        DesiredSize: 1
+        MaxSize: 5
+      InstanceTypes:
+        - !Ref InstanceType
+      Subnets: !Ref PrivateSubnets
+
+Outputs:
+  DataScienceClusterName:
+    Description: Name of the Data Science EKS cluster
+    Value: !Ref DataScienceEKSCluster
+
+  AnalyticsClusterName:
+    Description: Name of the Analytics EKS cluster
+    Value: !Ref AnalyticsEKSCluster
+
+  GatewayClusterName:
+    Description: Name of the Gateway EKS cluster
+    Value: !Ref GatewayEKSCluster
+
+  DataScienceClusterEndpoint:
+    Description: Endpoint for the Data Science EKS cluster
+    Value: !GetAtt DataScienceEKSCluster.Endpoint
+
+  AnalyticsClusterEndpoint:
+    Description: Endpoint for the Analytics EKS cluster
+    Value: !GetAtt AnalyticsEKSCluster.Endpoint
+
+  GatewayClusterEndoint:
+    Description: Endpoint for the Gateway EKS cluster
+    Value: !GetAtt GatewayEKSCluster.Endpoint
+
+  EKSSecurityGroups:
+    Description: Security Groups for the EKS clusters
+    Value:
+      !Join [
+        ",",
+        [
+          !GetAtt DataScienceEKSCluster.ClusterSecurityGroupId,
+          !GetAtt AnalyticsEKSCluster.ClusterSecurityGroupId,
+          !GetAtt GatewayEKSCluster.ClusterSecurityGroupId,
+        ],
+      ]
+
+  DataScienceEKSSecurityGroup:
+    Description: ID of the first EKS Security Group
+    Value: !GetAtt DataScienceEKSCluster.ClusterSecurityGroupId
+
+  AnalyticsEKSSecurityGroup:
+    Description: ID of the second EKS Security Group
+    Value: !GetAtt AnalyticsEKSCluster.ClusterSecurityGroupId
+
+  GatewayEKSSecurityGroup:
+    Description: ID of the Gateway EKS Security Group
+    Value: !GetAtt GatewayEKSCluster.ClusterSecurityGroupId
+
+  DataScienceClusterOidcProviderUrl:
+    Value:
+      !Select [
+        1,
+        !Split [
+          "https://",
+          !GetAtt DataScienceEKSCluster.OpenIdConnectIssuerUrl,
+        ],
+      ]
+
+  AnalyticsClusterOidcProviderUrl:
+    Value:
+      !Select [
+        1,
+        !Split ["https://", !GetAtt AnalyticsEKSCluster.OpenIdConnectIssuerUrl],
+      ]
+
+  GatewayClusterOidcProviderUrl:
+    Value:
+      !Select [
+        1,
+        !Split ["https://", !GetAtt GatewayEKSCluster.OpenIdConnectIssuerUrl],
+      ]

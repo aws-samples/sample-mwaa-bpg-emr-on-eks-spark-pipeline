@@ -1,0 +1,251 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "MWAA Stack for Apache Airflow Environment"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "MWAA-BPG-Spark-Pipeline"
+    Description: Environment name used for tagging and resource naming
+
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC ID where MWAA will be deployed
+
+  PrivateSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of private subnet IDs for MWAA
+
+  MWAAEnvironmentName:
+    Type: String
+    Default: airflow-environment
+    Description: Name of the MWAA environment
+
+  AirflowVersion:
+    Type: String
+    Default: "2.10.3"
+    Description: Version of Apache Airflow to use
+
+  EnvironmentBucketName:
+    Type: String
+    Description: Name of the S3 bucket where DAGs will be stored
+
+Resources:
+  MwaaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - airflow-env.amazonaws.com
+                - airflow.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: "/service-role/"
+
+  MwaaExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: | 
+              HTTPS access to 0.0.0.0/0 is required for MWAA to access AWS services and download 
+              required packages. This is a minimum requirement for MWAA to function.
+          - id: W13
+            reason: |
+              Resource "*" is required for s3:GetAccountPublicAccessBlock and s3:GetBucketPublicAccessBlock 
+              as these are account-level permissions needed for MWAA to validate S3 bucket configurations.
+          - id: W23
+            reason: |
+              NotResource is intentionally used to prevent access to customer-managed KMS keys 
+              while allowing access to AWS-managed keys for SQS encryption. 
+              This is a security best practice to ensure MWAA only uses AWS-managed keys for SQS operations.
+    Properties:
+      Roles:
+        - !Ref MwaaExecutionRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: airflow:PublishMetrics
+            Resource:
+              - !Sub "arn:${AWS::Partition}:airflow:${AWS::Region}:${AWS::AccountId}:environment/*"
+          - Effect: Allow
+            Action:
+              - s3:GetAccountPublicAccessBlock
+              - s3:GetBucketPublicAccessBlock
+            Resource: "*"          
+          - Effect: Deny
+            Action: s3:ListAllMyBuckets
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${EnvironmentBucketName}"
+          - Effect: Allow
+            Action:
+              - "s3:GetObject"
+              - "s3:GetObjectVersion"
+              - "s3:PutObject"
+              - "s3:DeleteObject"
+              - "s3:ListBucket"
+              - "s3:GetBucketLocation"
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${EnvironmentBucketName}"
+              - !Sub "arn:${AWS::Partition}:s3:::${EnvironmentBucketName}/*"
+          - Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+            Resource:
+              - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:airflow-*"
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:CreateLogGroup
+              - logs:PutLogEvents
+              - logs:GetLogEvents
+              - logs:GetLogRecord
+              - logs:GetLogGroupFields
+              - logs:GetQueryResults
+              - logs:DescribeLogGroups
+            Resource:
+              - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:airflow-*"
+          - Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource:
+              - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:*"
+            Condition:
+              StringEquals:
+                "cloudwatch:namespace": ["AmazonMWAA"]
+          - Effect: Allow
+            Action:
+              - sqs:ChangeMessageVisibility
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+            Resource:
+              - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:*:airflow-celery-*"
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:Encrypt
+            NotResource: !Sub "arn:${AWS::Partition}:kms:*:${AWS::AccountId}:key/*"
+            Condition:
+              StringLike:
+                "kms:ViaService":
+                  - !Sub "sqs.${AWS::Region}.amazonaws.com"
+
+  MWAASecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: MWAA requires outbound internet access to download packages and dependencies   
+          - id: W40
+            reason: |
+              All protocols egress is required for MWAA to function properly, allowing: Access to AWS services, 
+              Package downloads and updates, Connection to external endpoints, DNS resolution and NTP synchronization 
+          - id: W42
+            reason: |
+              This security group ingress rule allows all protocols within the same security group 
+              which is required for MWAA worker nodes to communicate with each other. 
+              This is a standard MWAA architecture requirement for internal communication.
+    Properties:
+      GroupDescription: Security group for MWAA environment
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-mwaa-sg
+
+  MWAASecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: MWAA requires outbound internet access to download packages and dependencies   
+          - id: W40
+            reason: |
+              All protocols egress is required for MWAA to function properly, allowing: Access to AWS services, 
+              Package downloads and updates, Connection to external endpoints, DNS resolution and NTP synchronization      
+          - id: W42
+            reason: |
+              This security group ingress rule allows all protocols within the same security group 
+              which is required for MWAA worker nodes to communicate with each other. 
+              This is a standard MWAA architecture requirement for internal communication.
+    Properties:
+      GroupId: !Ref MWAASecurityGroup
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      SourceSecurityGroupId: !Ref MWAASecurityGroup
+      Description: Allow all traffic within the security group
+
+  MWAASecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: MWAA requires outbound internet access to download packages and dependencies
+          - id: W40
+            reason: |
+              All protocols egress is required for MWAA to function properly, allowing: Access to AWS services, 
+              Package downloads and updates, Connection to external endpoints, DNS resolution and NTP synchronization    
+    Properties:
+      GroupId: !Ref MWAASecurityGroup
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: 0.0.0.0/0
+      Description: Allow all outbound traffic
+
+  MWAAEnvironment:
+    Type: AWS::MWAA::Environment
+    DependsOn: MwaaExecutionPolicy
+    Properties:
+      Name: !Ref MWAAEnvironmentName
+      AirflowVersion: !Ref AirflowVersion
+      SourceBucketArn: !Sub arn:${AWS::Partition}:s3:::${EnvironmentBucketName}
+      DagS3Path: dags
+      ExecutionRoleArn: !GetAtt MwaaExecutionRole.Arn
+      NetworkConfiguration:
+        SecurityGroupIds:
+          - !Ref MWAASecurityGroup
+        SubnetIds: !Ref PrivateSubnets
+      WebserverAccessMode: PUBLIC_ONLY
+      LoggingConfiguration:
+        DagProcessingLogs:
+          Enabled: true
+          LogLevel: INFO
+        SchedulerLogs:
+          Enabled: true
+          LogLevel: INFO
+        TaskLogs:
+          Enabled: true
+          LogLevel: INFO
+        WebserverLogs:
+          Enabled: true
+          LogLevel: INFO
+        WorkerLogs:
+          Enabled: true
+          LogLevel: INFO
+
+Outputs:
+  MWAAEnvironmentArn:
+    Description: ARN of the MWAA Environment
+    Value: !GetAtt MWAAEnvironment.Arn
+
+  MWAAWebserverUrl:
+    Description: The webserver URL of the MWAA Environment
+    Value: !GetAtt MWAAEnvironment.WebserverUrl
+
+  MWAASecurityGroupId:
+    Description: Security Group ID for MWAA
+    Value: !Ref MWAASecurityGroup

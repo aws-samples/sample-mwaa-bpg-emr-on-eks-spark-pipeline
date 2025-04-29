@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "S3 Stack for MWAA BPG Spark Pipeline Infrastructure"
+
+Parameters:
+  ProjectName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: "MWAA-BPG-Spark-Pipeline"
+
+  MWAAS3BucketName:
+    Description: Name of the S3 bucket to be used for Airflow DAGs & Plugins
+    Type: String
+
+Resources:
+  MWAAS3Bucket:
+    Type: "AWS::S3::Bucket"
+    #checkov:skip=CKV_AWS_18: "Access logging is handled in a separate logging bucket"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "Access logging needs another bucket which would create a cyclic dependency. In production, implement logging with a separate logging bucket."
+          - id: W28
+            reason: "Explicit name is required for S3 bucket identification and integration with other systems"
+          - id: W51
+            reason: "Using IAM roles for access control instead of bucket policies as this is more appropriate for EMR/BPG use case"
+    Properties:
+      BucketName: !Sub "${MWAAS3BucketName}-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  MWAAS3AccessPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Explicit name is required for policy identification and integration with other systems"
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "s3:ListBucket"
+              - "s3:GetBucketLocation"
+            Resource: !GetAtt MWAAS3Bucket.Arn
+          - Effect: Allow
+            Action:
+              - "s3:PutObject"
+              - "s3:GetObject"
+              - "s3:DeleteObject"
+            Resource: !Sub "${MWAAS3Bucket.Arn}/*"
+
+Outputs:
+  S3BucketName:
+    Description: Name of the created S3 bucket
+    Value: !Ref MWAAS3Bucket
+
+  S3BucketArn:
+    Description: ARN of the created S3 bucket
+    Value: !GetAtt MWAAS3Bucket.Arn
+
+  S3PolicyArn:
+    Description: ARN of the created IAM policy for S3 access
+    Value: !Ref MWAAS3AccessPolicy
